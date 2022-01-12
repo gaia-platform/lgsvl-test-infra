@@ -1,0 +1,211 @@
+From 57c0242da9abecdd43ac6b90a2bd07f79eefae60 Mon Sep 17 00:00:00 2001
+From: David Von Derau <dvd@gaiaplatform.io>
+Date: Tue, 11 Jan 2022 23:25:25 -0800
+Subject: [PATCH 3/4] Allow manual transmission in `lgsvl_interface`.
+
+---
+ .../lgsvl_interface/lgsvl_interface.hpp       |  7 +++
+ .../lgsvl_interface/param/lgsvl.param.yaml    |  1 +
+ .../lgsvl_interface/param/test.param.yaml     |  1 +
+ .../lgsvl_interface/src/lgsvl_interface.cpp   | 60 +++++++++++--------
+ .../src/lgsvl_interface_node.cpp              |  1 +
+ 5 files changed, 46 insertions(+), 24 deletions(-)
+
+diff --git a/src/drivers/lgsvl_interface/include/lgsvl_interface/lgsvl_interface.hpp b/src/drivers/lgsvl_interface/include/lgsvl_interface/lgsvl_interface.hpp
+index 303cc73a..c0ed5004 100644
+--- a/src/drivers/lgsvl_interface/include/lgsvl_interface/lgsvl_interface.hpp
++++ b/src/drivers/lgsvl_interface/include/lgsvl_interface/lgsvl_interface.hpp
+@@ -40,6 +40,7 @@
+ #include <geometry/lookup_table.hpp>
+ #include <rclcpp/rclcpp.hpp>
+ #include <vehicle_interface/platform_interface.hpp>
++#include <vehicle_interface/dbw_state_machine.hpp>
+ 
+ #include <tf2_ros/transform_listener.h>
+ #include <tf2_ros/buffer.h>
+@@ -50,6 +51,8 @@
+ #include <unordered_map>
+ #include <utility>
+ 
++using autoware::drivers::vehicle_interface::ManualGear;
++
+ namespace lgsvl_interface
+ {
+ 
+@@ -102,6 +105,7 @@ public:
+     Table1D && throttle_table,
+     Table1D && brake_table,
+     Table1D && steer_table,
++    bool is_manual_transmission = false,
+     bool publish_tf = NO_PUBLISH,
+     bool publish_pose = PUBLISH);
+ 
+@@ -153,6 +157,9 @@ private:
+   Table1D m_brake_table;
+   Table1D m_steer_table;
+ 
++  bool m_is_manual_transmission{false};
++  GEAR_TYPE m_last_manual_gear{VSC::GEAR_NEUTRAL};
++
+   // transforms
+   std::shared_ptr<tf2_ros::Buffer> m_tf_buffer;
+   std::shared_ptr<tf2_ros::TransformListener> m_tf_listener;
+diff --git a/src/drivers/lgsvl_interface/param/lgsvl.param.yaml b/src/drivers/lgsvl_interface/param/lgsvl.param.yaml
+index 37be1885..f4b9b8df 100644
+--- a/src/drivers/lgsvl_interface/param/lgsvl.param.yaml
++++ b/src/drivers/lgsvl_interface/param/lgsvl.param.yaml
+@@ -6,6 +6,7 @@
+     # "raw", "basic" or "high_level"
+     control_command: "raw"
+     lgsvl:
++      is_manual_transmission: False
+       use_nav_odometry_topic: True
+       throttle:
+         domain: [0.0, 3.0]
+diff --git a/src/drivers/lgsvl_interface/param/test.param.yaml b/src/drivers/lgsvl_interface/param/test.param.yaml
+index 523033dc..663e0b5c 100644
+--- a/src/drivers/lgsvl_interface/param/test.param.yaml
++++ b/src/drivers/lgsvl_interface/param/test.param.yaml
+@@ -3,6 +3,7 @@
+     cycle_time_ms: 10
+     control_command: "raw"
+     lgsvl:
++      is_manual_transmission: False
+       use_nav_odometry_topic: True
+       throttle:
+         domain: [0.0, 3.0]
+diff --git a/src/drivers/lgsvl_interface/src/lgsvl_interface.cpp b/src/drivers/lgsvl_interface/src/lgsvl_interface.cpp
+index 9baeabbb..393d9ead 100644
+--- a/src/drivers/lgsvl_interface/src/lgsvl_interface.cpp
++++ b/src/drivers/lgsvl_interface/src/lgsvl_interface.cpp
+@@ -81,11 +81,13 @@ LgsvlInterface::LgsvlInterface(
+   Table1D && throttle_table,
+   Table1D && brake_table,
+   Table1D && steer_table,
++  bool is_manual_transmission,
+   bool publish_tf,
+   bool publish_pose)
+ : m_throttle_table{throttle_table},
+   m_brake_table{brake_table},
+   m_steer_table{steer_table},
++  m_is_manual_transmission{is_manual_transmission},
+   m_logger{node.get_logger()}
+ {
+   const auto check = [](const auto value, const auto ref) -> bool8_t {
+@@ -265,13 +267,18 @@ bool8_t LgsvlInterface::send_state_command(const autoware_auto_msgs::msg::Vehicl
+   msg_corrected.blinker--;
+ 
+   // Correcting gears
+-  auto const gear_iter = autoware_to_lgsvl_gear.find(msg.gear);
+-
+-  if (gear_iter != autoware_to_lgsvl_gear.end()) {
+-    msg_corrected.gear = gear_iter->second;
++  if (m_is_manual_transmission) {
++    m_last_manual_gear = msg.gear;
++    msg_corrected.gear = m_last_manual_gear;
+   } else {
+-    msg_corrected.gear = static_cast<uint8_t>(VSD::GEAR_DRIVE);
+-    RCLCPP_WARN(m_logger, "Unsupported gear value in state command, defaulting to Drive");
++    auto const gear_iter = autoware_to_lgsvl_gear.find(msg.gear);
++
++    if (gear_iter != autoware_to_lgsvl_gear.end()) {
++      msg_corrected.gear = gear_iter->second;
++    } else {
++      msg_corrected.gear = static_cast<GEAR_TYPE>(VSD::GEAR_DRIVE);
++      RCLCPP_WARN(m_logger, "Unsupported gear value in state command, defaulting to Drive");
++    }
+   }
+ 
+   // Correcting wipers
+@@ -280,7 +287,7 @@ bool8_t LgsvlInterface::send_state_command(const autoware_auto_msgs::msg::Vehicl
+   if (wiper_iter != autoware_to_lgsvl_wiper.end()) {
+     msg_corrected.wiper = wiper_iter->second;
+   } else {
+-    msg_corrected.wiper = static_cast<uint8_t>(VSD::WIPERS_OFF);
++    msg_corrected.wiper = static_cast<WIPER_TYPE>(VSD::WIPERS_OFF);
+     RCLCPP_WARN(m_logger, "Unsupported wiper value in state command, defaulting to OFF");
+   }
+ 
+@@ -290,7 +297,7 @@ bool8_t LgsvlInterface::send_state_command(const autoware_auto_msgs::msg::Vehicl
+   if (mode_iter != autoware_to_lgsvl_mode.end()) {
+     msg_corrected.mode = mode_iter->second;
+   } else {
+-    msg_corrected.mode = static_cast<uint8_t>(VSD::VEHICLE_MODE_COMPLETE_MANUAL);
++    msg_corrected.mode = static_cast<MODE_TYPE>(VSD::VEHICLE_MODE_COMPLETE_MANUAL);
+     RCLCPP_WARN(m_logger, "Unsupported mode value in state command, defaulting to COMPLETE MANUAL");
+   }
+ 
+@@ -346,7 +353,7 @@ bool8_t LgsvlInterface::send_control_command(const autoware_auto_msgs::msg::RawC
+   control_data.set__braking_pct(static_cast<float>(msg.brake) / 100.f);
+   control_data.set__target_wheel_angle(-static_cast<float>(msg.front_steer) / 100.f);
+   // control_data.set__target_wheel_angular_rate();  // Missing angular rate in raw command
+-  // control_data.set__target_gear(); // Missing target gear in raw command
++  control_data.set__target_gear(m_last_manual_gear);
+   m_cmd_pub->publish(control_data);
+   return true;
+ }
+@@ -429,8 +436,10 @@ void LgsvlInterface::on_odometry(const nav_msgs::msg::Odometry & msg)
+       vse_t.state.longitudinal_velocity_mps = get_odometry().velocity_mps;
+       vse_t.state.front_wheel_angle_rad = get_odometry().front_wheel_angle_rad;
+       vse_t.state.rear_wheel_angle_rad = get_odometry().rear_wheel_angle_rad;
+-      if (state_report().gear == autoware_auto_msgs::msg::VehicleStateReport::GEAR_REVERSE) {
+-        vse_t.state.longitudinal_velocity_mps *= -1.0f;
++      if (!m_is_manual_transmission) {
++        if (state_report().gear == autoware_auto_msgs::msg::VehicleStateReport::GEAR_REVERSE) {
++          vse_t.state.longitudinal_velocity_mps *= -1.0f;
++        }
+       }
+ 
+       vse_t.state.lateral_velocity_mps =
+@@ -489,20 +498,23 @@ void LgsvlInterface::on_state_report(const autoware_auto_msgs::msg::VehicleState
+   // in autoware_auto_msgs::msg::VehicleStateCommand 1 is drive, 2 is reverse, https://gitlab.com/autowarefoundation/autoware.auto/AutowareAuto/-/blob/9744f6dc/src/messages/autoware_auto_msgs/msg/VehicleStateCommand.msg#L32
+   // in lgsvl 0 is drive and 1 is reverse https://github.com/lgsvl/simulator/blob/cb937deb8e633573f6c0cc76c9f451398b8b9eff/Assets/Scripts/Sensors/VehicleStateSensor.cs#L70
+ 
+-
+-  // Find autoware gear via inverse mapping
+-  const auto value_same = [&msg](const auto & kv) -> bool {  // also do some capture
+-      return msg.gear == kv.second;
+-    };
+-  const auto it = std::find_if(
+-    autoware_to_lgsvl_gear.begin(),
+-    autoware_to_lgsvl_gear.end(), value_same);
+-
+-  if (it != autoware_to_lgsvl_gear.end()) {
+-    corrected_report.gear = it->first;
++  if (m_is_manual_transmission) {
++    corrected_report.gear = m_last_manual_gear;
+   } else {
+-    corrected_report.gear = msg.GEAR_NEUTRAL;
+-    RCLCPP_WARN(m_logger, "Invalid gear value in state report from LGSVL simulator");
++    // Find autoware gear via inverse mapping
++    const auto value_same = [&msg](const auto & kv) -> bool {  // also do some capture
++        return msg.gear == kv.second;
++      };
++    const auto it = std::find_if(
++      autoware_to_lgsvl_gear.begin(),
++      autoware_to_lgsvl_gear.end(), value_same);
++
++    if (it != autoware_to_lgsvl_gear.end()) {
++      corrected_report.gear = it->first;
++    } else {
++      corrected_report.gear = msg.GEAR_NEUTRAL;
++      RCLCPP_WARN(m_logger, "Invalid gear value in state report from LGSVL simulator");
++    }
+   }
+ 
+   // Correcting blinker value, they are shifted up by one,
+diff --git a/src/drivers/lgsvl_interface/src/lgsvl_interface_node.cpp b/src/drivers/lgsvl_interface/src/lgsvl_interface_node.cpp
+index 1065b1b3..1ef2b20f 100644
+--- a/src/drivers/lgsvl_interface/src/lgsvl_interface_node.cpp
++++ b/src/drivers/lgsvl_interface/src/lgsvl_interface_node.cpp
+@@ -81,6 +81,7 @@ LgsvlInterfaceNode::LgsvlInterfaceNode(
+       table("throttle"),
+       table("brake"),
+       table("steer"),
++      declare_parameter("lgsvl.is_manual_transmission").get<bool>(),
+       pub_tf,
+       pub_pose
+   ));
+-- 
+2.32.0.windows.2
+

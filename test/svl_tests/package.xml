@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>svl_tests</name>
+  <version>1.0.0</version>
+  <description>Package for running SVL tests. Created by Gaia Platform LLC in collaboration with the University of Hawai'i and University of San Diego AI Racing Tech Team.</description>
+  <maintainer email="dax@gaiaplatform.io">Dax Hawkins</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>lgsvl_interface</depend>
+  <depend>iac_msgs</depend>
+  <depend>iac_common</depend>
+  <depend>lgsvl_msgs</depend>
+  <depend>lgsvl_mocks</depend>
+  <depend>sensor_msgs</depend>
+
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>lgsvl_mocks</name>
+  <version>1.0.0</version>
+  <description>Provides mock implementations of race control and other IAC devices. Created by Gaia Platform LLC in collaboration with the University of Hawai'i and University of San Diego AI Racing Tech Team.</description>
+  <maintainer email="dax@gaiaplatform.io">Dax Hawkins</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake_auto</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclcpp_components</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>novatel_oem7_msgs</depend>
+  <depend>raptor_dbw_msgs</depend>
+  <depend>iac_msgs</depend>
+  <depend>iac_common</depend>
+  <depend>lgsvl_msgs</depend>
+  <depend>tf2</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

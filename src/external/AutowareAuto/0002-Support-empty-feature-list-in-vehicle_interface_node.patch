@@ -1,0 +1,35 @@
+From ba67ee18d9dc5d6dac2d95865f9facf2089282fa Mon Sep 17 00:00:00 2001
+From: David Von Derau <dvd@gaiaplatform.io>
+Date: Tue, 11 Jan 2022 23:24:37 -0800
+Subject: [PATCH 2/4] Support empty feature list in `vehicle_interface_node`.
+
+---
+ src/drivers/vehicle_interface/src/vehicle_interface_node.cpp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/src/drivers/vehicle_interface/src/vehicle_interface_node.cpp b/src/drivers/vehicle_interface/src/vehicle_interface_node.cpp
+index 3da4a49f..4639ef97 100644
+--- a/src/drivers/vehicle_interface/src/vehicle_interface_node.cpp
++++ b/src/drivers/vehicle_interface/src/vehicle_interface_node.cpp
+@@ -100,6 +100,10 @@ VehicleInterfaceNode::VehicleInterfaceNode(
+ 
+   if (feature_list_string.get_type() != rclcpp::PARAMETER_NOT_SET) {
+     for (const auto & feature : feature_list_string.template get<std::vector<std::string>>()) {
++      if (feature == "") {
++        continue;
++      }
++
+       const auto found_feature = m_avail_features.find(feature);
+ 
+       if (found_feature == m_avail_features.end()) {
+@@ -328,6 +332,7 @@ void VehicleInterfaceNode::init(
+     using RCC = autoware_auto_msgs::msg::RawControlCommand;
+     m_command_sub =
+       create_subscription<RCC>("raw_command", rclcpp::QoS{10U}, cmd_callback(RCC{}));
++    m_state_machine = state_machine();
+   } else {
+     throw std::domain_error{"Vehicle interface must have exactly one command subscription"};
+   }
+-- 
+2.32.0.windows.2
+

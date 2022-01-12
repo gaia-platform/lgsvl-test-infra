@@ -1,0 +1,5 @@
+variables:
+  # Change ADE_AUTOWARE_ARTIFACTS_TAG to point to a different release of AutowareAuto.
+  ADE_AUTOWARE_ARTIFACTS_TAG: # TODO(user): This should be a tag that exists on the Gitlab project used below.
+  ADE_AUTOWARE_PROJECT_ID: # TODO(user): This should be a Gitlab project that builds the AutowareAuto fork.
+  ADE_AUTOWARE_DOCKER_REPO: # TODO(user): This is the path to Docker registry of the Gitlab project that builds the AutowareAuto fork.

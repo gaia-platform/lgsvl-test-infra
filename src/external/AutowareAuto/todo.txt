@@ -1,0 +1,1 @@
+# TODO(user): Apply this patch set to `AutowareAuto` for manual gear support on `lgsvl_interface` and `ne_raptor_interface`.

@@ -1,0 +1,9 @@
+builtin_interfaces/Time stamp
+
+bool engine_on_status
+bool engine_run_switch_status
+float32 throttle_position
+int8 current_gear
+float32 engine_rpm
+float32 vehicle_speed_kmph
+int8 gear_shift_status

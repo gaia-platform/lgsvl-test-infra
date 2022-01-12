@@ -1,0 +1,296 @@
+stages:
+  - .pre
+  - ade
+  - build
+  - test
+  - deploy
+
+include: '.gitlab-ci-autoware-tag.yml'
+
+# TODO(user): Assumes that LGSVL_TEST_INFRA_CI_DEPLOY_PRIVATE_KEY and LGSVL_TEST_INFRA_DEPLY_PRIVATE_TOKEN exist in the Gitlab repo or group.
+
+default:
+  before_script:
+    # https://docs.gitlab.com/ee/ci/ssh_keys/index.html#ssh-keys-when-using-the-docker-executor
+    # Install ssh-agent if not already installed, it is required by Docker.
+    - 'command -v ssh-agent >/dev/null || ( apt-get update -y && apt-get install openssh-client -y )'
+    # Run ssh-agent (inside the build environment)
+    - eval $(ssh-agent -s)
+    # https://gitlab.com/gitlab-examples/ssh-private-key/-/issues/1#note_15038961
+    # https://gitlab.com/gitlab-org/gitlab-runner/-/issues/1491
+    - echo "$LGSVL_TEST_INFRA_CI_DEPLOY_PRIVATE_KEY" | base64 -d | ssh-add -
+    # Create the SSH directory and give it the right permissions
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    # https://docs.gitlab.com/ee/ci/ssh_keys/index.html#verifying-the-ssh-host-keys
+    - ssh-keyscan gitlab.com >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+    - ls # Show the current working directory.
+
+.gen_deps_base:
+  variables:
+    ADE_IMAGE: registry.gitlab.com/${ADE_AUTOWARE_DOCKER_REPO}/$ARCH/ade-$ROS_DISTRO:$ADE_AUTOWARE_ARTIFACTS_TAG
+    ADE_JOB_NAME: build_${ARCH}_${ROS_DISTRO}
+  stage: .pre
+  image: $ADE_IMAGE
+  script:
+    - 'curl -L --output /tmp/artifacts.zip --header "PRIVATE-TOKEN: $LGSVL_TEST_INFRA_DEPLY_PRIVATE_TOKEN" "https://gitlab.com/api/v4/projects/$ADE_AUTOWARE_PROJECT_ID/jobs/artifacts/$ADE_AUTOWARE_ARTIFACTS_TAG/download?job=$ADE_JOB_NAME"'
+    - unzip /tmp/artifacts.zip -d /tmp/
+    - tar xzf /tmp/opt.tar.gz -C /
+    - rm /tmp/artifacts.zip
+    - rm /tmp/opt.tar.gz
+    - source /opt/AutowareAuto/setup.bash
+    - rosdep update
+    - rosdep install --as-root "apt:false pip:false" --simulate --reinstall --ignore-src -y --from-paths . | sort >> ros-deps
+  artifacts:
+    name: "$CI_JOB_NAME"
+    paths:
+      - ros-deps
+
+.ade_base:
+  variables:
+    ADE_IMAGE: registry.gitlab.com/${ADE_AUTOWARE_DOCKER_REPO}/$ARCH/ade-$ROS_DISTRO:$ADE_AUTOWARE_ARTIFACTS_TAG
+    ADE_JOB_NAME: build_${ARCH}_${ROS_DISTRO}
+    DOCKER_DRIVER: overlay2
+    UBUNTU_DISTRO: focal
+  stage: ade
+  image: docker
+  services:
+    - docker:dind
+  script:
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
+    - apk add --update-cache git curl
+    - 'curl -L --output /tmp/artifacts.zip --header "PRIVATE-TOKEN: $LGSVL_TEST_INFRA_DEPLY_PRIVATE_TOKEN" "https://gitlab.com/api/v4/projects/$ADE_AUTOWARE_PROJECT_ID/jobs/artifacts/$ADE_AUTOWARE_ARTIFACTS_TAG/download?job=$ADE_JOB_NAME"'
+    - mv /tmp/artifacts.zip tools/examples/ade_image
+    - mv ros-deps tools/examples/ade_image
+    - cd tools/examples/ade_image
+    - export ADE_SHA=$(find . -type f | sort | xargs sha256sum | sha256sum | rev | cut -c 4- | rev)
+    - '
+      if [[ -n "$FORCE" ]]; then
+          chmod og-w . -R;
+          docker build
+              --build-arg ROS_DISTRO=${ROS_DISTRO}
+              --build-arg CODENAME=${UBUNTU_DISTRO}
+              --build-arg ADE_IMAGE=${ADE_IMAGE}
+              --label ade_image_commit_sha="$CI_COMMIT_SHA"
+              --label ade_image_commit_tag="$CI_COMMIT_TAG"
+              -t image .;
+      else
+          (
+              docker pull $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:change-$ADE_SHA &&
+              docker tag $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:change-$ADE_SHA image
+          ) || (
+              chmod og-w . -R;
+              docker build
+                  --build-arg ROS_DISTRO=${ROS_DISTRO}
+                  --build-arg CODENAME=${UBUNTU_DISTRO}
+                  --build-arg ADE_IMAGE=${ADE_IMAGE}
+                  --label ade_image_commit_sha="$CI_COMMIT_SHA"
+                  --label ade_image_commit_tag="$CI_COMMIT_TAG"
+                  -t image .;
+          );
+      fi
+      '
+    - docker tag image $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:change-$ADE_SHA
+    - docker push $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:change-$ADE_SHA
+    - docker tag image $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:commit-$CI_COMMIT_SHA
+    - docker push $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:commit-$CI_COMMIT_SHA
+    - '
+      case $CI_COMMIT_REF_NAME in
+          *\/*)
+              echo "Not pushing ade-$ROS_DISTRO container due to / in branch name $CI_COMMIT_REF_NAME"
+              ;;
+          *\\*)
+              echo "Not pushing ade-$ROS_DISTRO container due to \ in branch name $CI_COMMIT_REF_NAME"
+              ;;
+          *)
+              docker tag image $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:$CI_COMMIT_REF_NAME;
+              docker push $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:$CI_COMMIT_REF_NAME;
+              ;;
+      esac
+      '
+  after_script:
+    - docker container rm -f $(docker container ls --filter "status=exited" -q)
+    - docker image rm $(docker image ls -q)
+
+.build_base:
+  variables:
+    RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
+  stage: build
+  image: $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:commit-$CI_COMMIT_SHA
+  script:
+    # Build
+    - 'colcon build
+           --merge-install
+           --install-base /opt/lgsvl_test_infra
+           --cmake-args -DCMAKE_BUILD_TYPE=Release
+      '
+    # Build information.
+    - printf "%s" "$ADE_AUTOWARE_ARTIFACTS_TAG" > "/opt/lgsvl_test_infra/ADE_AUTOWARE_ARTIFACTS_TAG"
+    - printf "%s" "$CI_COMMIT_SHA" > "/opt/lgsvl_test_infra/commit_sha"
+    - printf "%s" "$CI_COMMIT_REF_NAME" > "/opt/lgsvl_test_infra/commit_ref_name"
+    - printf "%s" "$CI_PIPELINE_ID" > "/opt/lgsvl_test_infra/pipeline_id"
+    - printf "%s" "$CI_PROJECT_URL" > "/opt/lgsvl_test_infra/project_url"
+    - printf "%s" "$(git log -1 --pretty=%B)" > "/opt/lgsvl_test_infra/commit_message"
+    - chmod -R og-w /opt/lgsvl_test_infra
+    - tar czf opt.tar.gz /opt/lgsvl_test_infra
+  artifacts:
+    name: "$CI_JOB_NAME"
+    paths:
+      - build/
+      - opt.tar.gz
+      - ros-deps
+      - tools/examples/ade_image/apt-packages
+      - tools/examples/ade_image/pip3-packages
+
+.test_base:
+  variables:
+    RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
+  stage: test
+  image: $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:commit-$CI_COMMIT_SHA
+  script:
+    - tar xzf opt.tar.gz -C /
+    - source /opt/lgsvl_test_infra/setup.bash
+
+    # Test
+    - 'colcon test
+           --merge-install
+           --install-base /opt/lgsvl_test_infra
+           --packages-up-to $(cat packages_for_test.txt)
+           --return-code-on-test-failure
+      '
+    - 'colcon test-result --all |grep xml |cut -d":" -f1 |xargs .gitlab-ci/merge-test-results test-results.xml || true'
+  after_script:
+    - colcon test-result --verbose
+  artifacts:
+    name: "$CI_JOB_NAME"
+    paths:
+      - log
+    reports:
+      junit: test-results.xml
+
+.volume_base:
+  variables:
+    DOCKER_DRIVER: overlay2
+    RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
+    UBUNTU_DISTRO: focal
+  stage: deploy
+  image: docker
+  services:
+    - docker:dind
+  script:
+    - 'echo -e "*\n!opt.tar.gz" > .dockerignore'
+    - |
+      cat >Dockerfile <<EOF
+      FROM alpine
+      ADD opt.tar.gz /
+      VOLUME /opt/lgsvl_test_infra
+      CMD ["/bin/sh", "-c", "trap 'exit 147' TERM; tail -f /dev/null & wait ${!}"]
+      EOF
+    - 'docker build
+          --build-arg ROS_DISTRO=${ROS_DISTRO}
+          --build-arg CODENAME=${UBUNTU_DISTRO}
+          --label ade_image_commit_sha="$CI_COMMIT_SHA"
+          --label ade_image_commit_tag="$CI_COMMIT_TAG"
+          -t image .
+      '
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
+    - docker tag image $CI_REGISTRY_IMAGE/$ARCH/binary-$ROS_DISTRO:commit-$CI_COMMIT_SHA
+    - docker push $CI_REGISTRY_IMAGE/$ARCH/binary-$ROS_DISTRO:commit-$CI_COMMIT_SHA
+    - '
+      case $CI_COMMIT_REF_NAME in
+          *\/*)
+              echo "Not pushing binary-$ROS_DISTRO container due to / in branch name $CI_COMMIT_REF_NAME"
+              ;;
+          *\\*)
+              echo "Not pushing binary-$ROS_DISTRO container due to \ in branch name $CI_COMMIT_REF_NAME"
+              ;;
+          *)
+              docker tag image $CI_REGISTRY_IMAGE/$ARCH/binary-$ROS_DISTRO:$CI_COMMIT_REF_NAME;
+              docker push $CI_REGISTRY_IMAGE/$ARCH/binary-$ROS_DISTRO:$CI_COMMIT_REF_NAME;
+              ;;
+      esac
+      '
+  after_script:
+    - docker container rm -f $(docker container ls --filter "status=exited" -q)
+    - docker image rm $(docker image ls -q)
+
+.release_base:
+  before_script: [] # Ignore default before_script.
+  variables:
+    RELEASE_NAME: $CI_COMMIT_TAG-$ARCH-$ROS_DISTRO
+    BUILD_JOB_NAME: build_${ARCH}_${ROS_DISTRO}
+    TEST_JOB_NAME: test_${ARCH}_${ROS_DISTRO}
+  stage: deploy
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - echo 'Creating release $RELEASE_NAME for tag $CI_COMMIT_TAG'
+  release:
+    name: '$RELEASE_NAME'
+    description: 'Created for tag $CI_COMMIT_TAG'
+    tag_name: '$CI_COMMIT_TAG'
+    ref: '$CI_COMMIT_TAG'
+    assets:
+      links:
+        - name: $BUILD_JOB_NAME.zip
+          url: '$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/download?job=$BUILD_JOB_NAME'
+        - name: $TEST_JOB_NAME.zip
+          url: '$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/download?job=$TEST_JOB_NAME'
+
+gen_ros_deps_amd64_foxy:
+  interruptible: true
+  variables:
+    ARCH: amd64
+    ROS_DISTRO: foxy
+  extends: .gen_deps_base
+
+ade_amd64_foxy:
+  interruptible: true
+  variables:
+    ARCH: amd64
+    ROS_DISTRO: foxy
+  extends: .ade_base
+  needs:
+    - gen_ros_deps_amd64_foxy
+
+build_amd64_foxy:
+  interruptible: true
+  variables:
+    ARCH: amd64
+    ROS_DISTRO: foxy
+  tags:
+    - shared
+  extends: .build_base
+  needs:
+    - gen_ros_deps_amd64_foxy
+    - ade_amd64_foxy
+
+test_amd64_foxy:
+  interruptible: true
+  variables:
+    ARCH: amd64
+    ROS_DISTRO: foxy
+  tags:
+    - shared
+  extends: .test_base
+  needs:
+    - build_amd64_foxy
+
+volume_amd64_foxy:
+  variables:
+    ARCH: amd64
+    ROS_DISTRO: foxy
+  extends: .volume_base
+  needs:
+    - build_amd64_foxy
+    - test_amd64_foxy
+
+release_amd64_foxy:
+  variables:
+    ARCH: amd64
+    ROS_DISTRO: foxy
+  extends: .release_base
+  needs:
+    - volume_amd64_foxy

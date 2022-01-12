@@ -1,0 +1,68 @@
+# ROS2 build folders.
+**/build/**
+**/install/**
+**/build_isolated/**
+**/install_isolated/**
+**/devel/**
+*cmake-build*
+
+# Log directories.
+**/log/**
+**/logs/**
+**/log_folder/**
+
+# Python caches.
+**/__pycache__/**
+**/.eggs/**
+
+# Test files for Docker images.
+artifacts.zip
+ros-deps
+
+# Environment for svl_tests.
+.svl_tests_env
+
+## XCode / Mac Artifacts
+.DS_Store
+**/.DS_Store
+xcuserdata/
+
+## MSVC Artifacts
+.vscode/
+.vs/
+
+## CLion Artifacts
+cmake-build-debug
+.cmake-build-debug
+.idea
+
+## Clang Complete Artifacts (used by Atom)
+/.clang_complete
+/tags
+
+## Valgrind and Callgrind
+vgcore.*
+*.log
+*.out*
+
+## Vizdep
+*.dot
+*.pickle
+*.svg
+
+## X-Compile Artifacts
+target_fs/
+
+## Miscellaneous
+*.cmd
+*.tmp
+*.user
+*.db
+*.opendb
+*.swp
+*.swo
+*.gch
+*.patch
+
+## python notebook checkpoints
+*.ipynb_checkpoints/

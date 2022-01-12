@@ -1,0 +1,372 @@
+From 935a4550afcb5c0f311b1eeae1bf7d6df395f85d Mon Sep 17 00:00:00 2001
+From: David Von Derau <dvd@gaiaplatform.io>
+Date: Tue, 11 Jan 2022 23:26:45 -0800
+Subject: [PATCH 4/4] Support manual gears and `RawControlCommand` in
+ `ne_raptor_interface`.
+
+---
+ .../ne_raptor_interface.hpp                   |   5 +
+ .../test_ne_raptor_interface.hpp              |   2 +
+ .../param/defaults.param.yaml                 |   1 +
+ .../ne_raptor_interface/param/test.param.yaml |   1 +
+ .../src/ne_raptor_interface.cpp               | 191 +++++++++++++-----
+ .../src/ne_raptor_interface_node.cpp          |   1 +
+ .../test/test_ne_raptor_interface.cpp         |   5 +-
+ 7 files changed, 153 insertions(+), 53 deletions(-)
+
+diff --git a/src/drivers/ne_raptor_interface/include/ne_raptor_interface/ne_raptor_interface.hpp b/src/drivers/ne_raptor_interface/include/ne_raptor_interface/ne_raptor_interface.hpp
+index 78535921..c3e68017 100644
+--- a/src/drivers/ne_raptor_interface/include/ne_raptor_interface/ne_raptor_interface.hpp
++++ b/src/drivers/ne_raptor_interface/include/ne_raptor_interface/ne_raptor_interface.hpp
+@@ -124,6 +124,8 @@ using ModeChangeResponse = autoware_auto_msgs::srv::AutonomyModeChange_Response;
+ 
+ using autoware::drivers::vehicle_interface::DbwStateMachine;
+ using autoware::drivers::vehicle_interface::DbwState;
++using autoware::drivers::vehicle_interface::ManualGear;
++
+ using namespace std::chrono_literals;  // NOLINT
+ 
+ namespace autoware
+@@ -141,6 +143,7 @@ public:
+   /// \brief Default constructor.
+   /// \param[in] node Reference to node
+   /// \param[in] ecu_build_num ECU build #
++  /// \param[in] is_manual_transmission If true, uses 0-6 instead of PRND.
+   /// \param[in] front_axle_to_cog Distance from front axle to center-of-gravity in meters
+   /// \param[in] rear_axle_to_cog Distance from rear axle to center-of-gravity in meters
+   /// \param[in] steer_to_tire_ratio Ratio of steering angle / car tire angle
+@@ -153,6 +156,7 @@ public:
+   explicit NERaptorInterface(
+     rclcpp::Node & node,
+     uint16_t ecu_build_num,
++    bool is_manual_transmission,
+     float32_t front_axle_to_cog,
+     float32_t rear_axle_to_cog,
+     float32_t steer_to_tire_ratio,
+@@ -243,6 +247,7 @@ private:
+ 
+   rclcpp::Logger m_logger;
+   uint16_t m_ecu_build_num;
++  bool m_is_manual_transmission;
+   float32_t m_front_axle_to_cog;
+   float32_t m_rear_axle_to_cog;
+   float32_t m_steer_to_tire_ratio;
+diff --git a/src/drivers/ne_raptor_interface/include/ne_raptor_interface/test_ne_raptor_interface.hpp b/src/drivers/ne_raptor_interface/include/ne_raptor_interface/test_ne_raptor_interface.hpp
+index 4891c88c..2d50ee17 100644
+--- a/src/drivers/ne_raptor_interface/include/ne_raptor_interface/test_ne_raptor_interface.hpp
++++ b/src/drivers/ne_raptor_interface/include/ne_raptor_interface/test_ne_raptor_interface.hpp
+@@ -40,6 +40,7 @@ using autoware::drivers::vehicle_interface::DbwState;
+ 
+ /* Node init values */
+ const uint16_t c_ecu_build_num = 0xABCD;
++const bool c_is_manual_transmission = false;
+ const float32_t c_front_axle_to_cog = 1.5F;
+ const float32_t c_rear_axle_to_cog = 0.5F;
+ const float32_t c_steer_to_tire_ratio = 2.0F;
+@@ -86,6 +87,7 @@ protected:
+     ne_raptor_interface_ = std::make_unique<NERaptorInterface>(
+       *i_node_,
+       c_ecu_build_num,
++      c_is_manual_transmission,
+       c_front_axle_to_cog,
+       c_rear_axle_to_cog,
+       c_steer_to_tire_ratio,
+diff --git a/src/drivers/ne_raptor_interface/param/defaults.param.yaml b/src/drivers/ne_raptor_interface/param/defaults.param.yaml
+index 669ade49..86767ed5 100644
+--- a/src/drivers/ne_raptor_interface/param/defaults.param.yaml
++++ b/src/drivers/ne_raptor_interface/param/defaults.param.yaml
+@@ -6,6 +6,7 @@
+     control_command: "basic"
+     ne_raptor:
+       ecu_build_num: 0xFFFF
++      is_manual_transmission: False
+       front_axle_to_cog: 1.228
+       rear_axle_to_cog: 1.5618
+       # 470 degrees on steering wheel ~= 30 degrees on tire
+diff --git a/src/drivers/ne_raptor_interface/param/test.param.yaml b/src/drivers/ne_raptor_interface/param/test.param.yaml
+index 669ade49..86767ed5 100644
+--- a/src/drivers/ne_raptor_interface/param/test.param.yaml
++++ b/src/drivers/ne_raptor_interface/param/test.param.yaml
+@@ -6,6 +6,7 @@
+     control_command: "basic"
+     ne_raptor:
+       ecu_build_num: 0xFFFF
++      is_manual_transmission: False
+       front_axle_to_cog: 1.228
+       rear_axle_to_cog: 1.5618
+       # 470 degrees on steering wheel ~= 30 degrees on tire
+diff --git a/src/drivers/ne_raptor_interface/src/ne_raptor_interface.cpp b/src/drivers/ne_raptor_interface/src/ne_raptor_interface.cpp
+index 9d2baa3b..5073a50e 100644
+--- a/src/drivers/ne_raptor_interface/src/ne_raptor_interface.cpp
++++ b/src/drivers/ne_raptor_interface/src/ne_raptor_interface.cpp
+@@ -29,6 +29,7 @@ namespace ne_raptor_interface
+ NERaptorInterface::NERaptorInterface(
+   rclcpp::Node & node,
+   uint16_t ecu_build_num,
++  bool is_manual_transmission,
+   float32_t front_axle_to_cog,
+   float32_t rear_axle_to_cog,
+   float32_t steer_to_tire_ratio,
+@@ -41,6 +42,7 @@ NERaptorInterface::NERaptorInterface(
+ )
+ : m_logger{node.get_logger()},
+   m_ecu_build_num{ecu_build_num},
++  m_is_manual_transmission(is_manual_transmission),
+   m_front_axle_to_cog{front_axle_to_cog},
+   m_rear_axle_to_cog{rear_axle_to_cog},
+   m_steer_to_tire_ratio{steer_to_tire_ratio},
+@@ -199,32 +201,45 @@ bool8_t NERaptorInterface::send_state_command(const VehicleStateCommand & msg)
+   std::lock_guard<std::mutex> guard_mc(m_misc_cmd_mutex);
+ 
+   // Set gear values
+-  switch (msg.gear) {
+-    case VehicleStateCommand::GEAR_NO_COMMAND:
+-      m_gear_cmd.cmd.gear = Gear::NONE;
+-      break;
+-    case VehicleStateCommand::GEAR_DRIVE:
+-      m_gear_cmd.cmd.gear = Gear::DRIVE;
+-      break;
+-    case VehicleStateCommand::GEAR_REVERSE:
+-      m_gear_cmd.cmd.gear = Gear::REVERSE;
+-      break;
+-    case VehicleStateCommand::GEAR_PARK:
+-      m_gear_cmd.cmd.gear = Gear::PARK;
+-      break;
+-    case VehicleStateCommand::GEAR_LOW:
+-      m_gear_cmd.cmd.gear = Gear::LOW;
+-      break;
+-    case VehicleStateCommand::GEAR_NEUTRAL:
+-      m_gear_cmd.cmd.gear = Gear::NEUTRAL;
+-      break;
+-    default:  // error
+-      m_gear_cmd.cmd.gear = Gear::NONE;
++  if (m_is_manual_transmission) {
++    const auto c_min_gear = static_cast<uint8_t>(ManualGear::NONE);
++    const auto c_max_gear = static_cast<uint8_t>(ManualGear::SIXTH);
++    if ( (msg.gear < c_min_gear) || (msg.gear > c_max_gear) ) {
++      m_gear_cmd.cmd.gear = static_cast<uint8_t>(ManualGear::NONE);
+       RCLCPP_ERROR_THROTTLE(
+         m_logger, m_clock, CLOCK_1_SEC,
+         "Received command for invalid gear state.");
+       ret = false;
+-      break;
++    } else {
++      m_gear_cmd.cmd.gear = msg.gear;
++    }
++  } else {
++    switch (msg.gear) {
++      case VehicleStateCommand::GEAR_NO_COMMAND:
++        m_gear_cmd.cmd.gear = Gear::NONE;
++        break;
++      case VehicleStateCommand::GEAR_DRIVE:
++        m_gear_cmd.cmd.gear = Gear::DRIVE;
++        break;
++      case VehicleStateCommand::GEAR_REVERSE:
++        m_gear_cmd.cmd.gear = Gear::REVERSE;
++        break;
++      case VehicleStateCommand::GEAR_PARK:
++        m_gear_cmd.cmd.gear = Gear::PARK;
++        break;
++      case VehicleStateCommand::GEAR_LOW:
++        m_gear_cmd.cmd.gear = Gear::LOW;
++        break;
++      case VehicleStateCommand::GEAR_NEUTRAL:
++        m_gear_cmd.cmd.gear = Gear::NEUTRAL;
++        break;
++      default:  // error
++        m_gear_cmd.cmd.gear = Gear::NONE;
++        RCLCPP_ERROR_THROTTLE(
++          m_logger, m_clock, CLOCK_1_SEC,
++          "Received command for invalid gear state.");
++        ret = false;
++    }
+   }
+ 
+   // Set misc command values
+@@ -310,11 +325,82 @@ bool8_t NERaptorInterface::send_control_command(const HighLevelControlCommand &
+  */
+ bool8_t NERaptorInterface::send_control_command(const RawControlCommand & msg)
+ {
+-  (void)msg;
+-  RCLCPP_ERROR_THROTTLE(
+-    m_logger, m_clock, CLOCK_1_SEC,
+-    "NE Raptor does not support sending raw pedal controls directly.");
+-  return false;
++  bool8_t ret{true};
++  float32_t throttle_checked{0.0F};
++  float32_t angle_checked{0.0F};
++  float32_t brake_checked{0.0F};
++
++  std::lock_guard<std::mutex> guard_ac(m_accel_cmd_mutex);
++  std::lock_guard<std::mutex> guard_bc(m_brake_cmd_mutex);
++  std::lock_guard<std::mutex> guard_sc(m_steer_cmd_mutex);
++
++  // Using raw positions for control
++  m_accel_cmd.control_type.value = ActuatorControlMode::OPEN_LOOP;             // pedal position
++  m_steer_cmd.control_type.value = ActuatorControlMode::CLOSED_LOOP_ACTUATOR;  // angular position
++  m_brake_cmd.control_type.value = ActuatorControlMode::OPEN_LOOP;             // pedal position
++
++  // Set limits
++  m_steer_cmd.angle_velocity = m_max_steer_angle;
++  const auto c_max_pedal_position = 100.0F;
++  const auto c_min_pedal_position = 0.0F;
++
++  // Limit throttle to valid range [0, 100] -> [0.0F, 100.0F]
++  throttle_checked = static_cast<float>(msg.throttle);
++  if (throttle_checked > c_max_pedal_position) {
++    throttle_checked = c_max_pedal_position;
++    RCLCPP_ERROR_THROTTLE(
++      m_logger, m_clock, CLOCK_1_SEC,
++      "Got invalid throttle request value: request exceeds max.");
++    ret = false;
++  } else if (throttle_checked < c_min_pedal_position) {
++    throttle_checked = c_min_pedal_position;
++    RCLCPP_ERROR_THROTTLE(
++      m_logger, m_clock, CLOCK_1_SEC,
++      "Got invalid throttle request value: request exceeds min.");
++    ret = false;
++  }
++
++  // Limit brake to valid range [0, 100] -> [0.0F, 5516.0F]
++  brake_checked = static_cast<float>(msg.brake);
++  if (brake_checked > c_max_pedal_position) {
++    brake_checked = c_max_pedal_position;
++    RCLCPP_ERROR_THROTTLE(
++      m_logger, m_clock, CLOCK_1_SEC,
++      "Got invalid brake request value: request exceeds max.");
++    ret = false;
++  } else if (brake_checked < c_min_pedal_position) {
++    brake_checked = c_min_pedal_position;
++    RCLCPP_ERROR_THROTTLE(
++      m_logger, m_clock, CLOCK_1_SEC,
++      "Got invalid brake request value: request exceeds min.");
++    ret = false;
++  }
++  const auto c_brake_pressure_multiplier = 55.16F;
++  brake_checked *= c_brake_pressure_multiplier;
++
++  // Limit steering angle to valid range [-100, 100] -> [-210.0F, 210.0F]
++  angle_checked = (static_cast<float>(msg.front_steer) * m_steer_to_tire_ratio);
++  if (angle_checked > m_max_steer_angle) {
++    angle_checked = m_max_steer_angle;
++    RCLCPP_ERROR_THROTTLE(
++      m_logger, m_clock, CLOCK_1_SEC,
++      "Got invalid steering angle value: request exceeds max angle.");
++    ret = false;
++  }
++  if (angle_checked < (-1.0F * m_max_steer_angle)) {
++    angle_checked = -1.0F * m_max_steer_angle;
++    RCLCPP_ERROR_THROTTLE(
++      m_logger, m_clock, CLOCK_1_SEC,
++      "Got invalid steering angle value: request exceeds max angle.");
++    ret = false;
++  }
++
++  // Set commands
++  m_accel_cmd.pedal_cmd = throttle_checked;
++  m_steer_cmd.angle_cmd = angle_checked;
++  m_brake_cmd.pedal_cmd = brake_checked;
++
++  return ret;
+ }
+ 
+ bool8_t NERaptorInterface::send_control_command(const VehicleControlCommand & msg)
+@@ -487,30 +573,35 @@ void NERaptorInterface::on_brake_report(const BrakeReport::SharedPtr & msg)
+ 
+ void NERaptorInterface::on_gear_report(const GearReport::SharedPtr & msg)
+ {
+-  switch (msg->state.gear) {
+-    case Gear::PARK:
+-      state_report().gear = VehicleStateReport::GEAR_PARK;
+-      break;
+-    case Gear::REVERSE:
+-      state_report().gear = VehicleStateReport::GEAR_REVERSE;
+-      break;
+-    case Gear::NEUTRAL:
+-      state_report().gear = VehicleStateReport::GEAR_NEUTRAL;
+-      break;
+-    case Gear::DRIVE:
+-      state_report().gear = VehicleStateReport::GEAR_DRIVE;
+-      break;
+-    case Gear::LOW:
+-      state_report().gear = VehicleStateReport::GEAR_LOW;
+-      break;
+-    case Gear::NONE:
+-    default:
+-      state_report().gear = 0;
+-      RCLCPP_WARN_THROTTLE(
+-        m_logger, m_clock, CLOCK_1_SEC,
+-        "Received invalid gear value from NE Raptor DBW.");
+-      break;
++  if (m_is_manual_transmission) {
++    state_report().gear = msg->trans_curr_gear;
++  } else {
++    switch (msg->state.gear) {
++      case Gear::PARK:
++        state_report().gear = VehicleStateReport::GEAR_PARK;
++        break;
++      case Gear::REVERSE:
++        state_report().gear = VehicleStateReport::GEAR_REVERSE;
++        break;
++      case Gear::NEUTRAL:
++        state_report().gear = VehicleStateReport::GEAR_NEUTRAL;
++        break;
++      case Gear::DRIVE:
++        state_report().gear = VehicleStateReport::GEAR_DRIVE;
++        break;
++      case Gear::LOW:
++        state_report().gear = VehicleStateReport::GEAR_LOW;
++        break;
++      case Gear::NONE:
++      default:
++        state_report().gear = 0;
++        RCLCPP_WARN_THROTTLE(
++          m_logger, m_clock, CLOCK_1_SEC,
++          "Received invalid gear value from NE Raptor DBW.");
++        break;
++    }
+   }
++
+   m_seen_gear_rpt = true;
+ }
+ 
+diff --git a/src/drivers/ne_raptor_interface/src/ne_raptor_interface_node.cpp b/src/drivers/ne_raptor_interface/src/ne_raptor_interface_node.cpp
+index c4de0588..a52c14ec 100644
+--- a/src/drivers/ne_raptor_interface/src/ne_raptor_interface_node.cpp
++++ b/src/drivers/ne_raptor_interface/src/ne_raptor_interface_node.cpp
+@@ -43,6 +43,7 @@ NERaptorInterfaceNode::NERaptorInterfaceNode(const rclcpp::NodeOptions & options
+     std::make_unique<NERaptorInterface>(
+       *this,
+       declare_parameter("ne_raptor.ecu_build_num").get<uint16_t>(),
++      declare_parameter("ne_raptor.is_manual_transmission").get<bool>(),
+       declare_parameter("ne_raptor.front_axle_to_cog").get<float32_t>(),
+       declare_parameter("ne_raptor.rear_axle_to_cog").get<float32_t>(),
+       declare_parameter("ne_raptor.steer_to_tire_ratio").get<float32_t>(),
+diff --git a/src/drivers/ne_raptor_interface/test/test_ne_raptor_interface.cpp b/src/drivers/ne_raptor_interface/test/test_ne_raptor_interface.cpp
+index 068c6544..10bd504e 100644
+--- a/src/drivers/ne_raptor_interface/test/test_ne_raptor_interface.cpp
++++ b/src/drivers/ne_raptor_interface/test/test_ne_raptor_interface.cpp
+@@ -1783,10 +1783,9 @@ TEST_F(NERaptorInterfaceTest, DISABLED_TestCmdHighLevelControlNoMsgCheck)
+   }
+ }
+ 
+-/* Raw Control Command is not supported */
++/* Raw Control Command is supported */
+ TEST_F(NERaptorInterfaceTest, TestCmdRawControl)
+ {
+-  /* Not supported */
+   RawControlCommand rcc{};
+   rclcpp::executors::SingleThreadedExecutor executor;
+   executor.add_node(i_node_);
+@@ -1800,7 +1799,7 @@ TEST_F(NERaptorInterfaceTest, TestCmdRawControl)
+   rcc.front_steer = 0;
+   rcc.rear_steer = 0;
+ 
+-  EXPECT_FALSE(ne_raptor_interface_->send_control_command(rcc));
++  EXPECT_TRUE(ne_raptor_interface_->send_control_command(rcc));
+ }
+ 
+ /* Test Vehicle Control Command
+-- 
+2.32.0.windows.2
+

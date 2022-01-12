@@ -1,0 +1,6 @@
+export ADE_DOCKER_RUN_ARGS="--privileged --cap-add=SYS_PTRACE --link docker_host --device /dev/dri -v ${HOME}/.Xauthority:${HOME}/.Xauthority:ro -e XAUTHORITY=${HOME}/.Xauthority -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp --publish 9090:9090"
+export ADE_GITLAB=gitlab.com
+export ADE_REGISTRY=registry.gitlab.com
+export ADE_IMAGES="
+  <your repo ADE image>
+"

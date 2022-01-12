@@ -1,0 +1,313 @@
+stages:
+  - .pre
+  - ade
+  - build
+  - test
+  - deploy
+
+# TODO(user): Assumes that LGSVL_TEST_INFRA_CI_DEPLOY_PRIVATE_KEY exists in the Gitlab repo or group.
+
+default:
+  before_script:
+    # https://docs.gitlab.com/ee/ci/ssh_keys/index.html#ssh-keys-when-using-the-docker-executor
+    # Install ssh-agent if not already installed, it is required by Docker.
+    - 'command -v ssh-agent >/dev/null || ( apt-get update -y && apt-get install openssh-client -y )'
+    # Run ssh-agent (inside the build environment)
+    - eval $(ssh-agent -s)
+    # https://gitlab.com/gitlab-examples/ssh-private-key/-/issues/1#note_15038961
+    # https://gitlab.com/gitlab-org/gitlab-runner/-/issues/1491
+    - echo "$LGSVL_TEST_INFRA_CI_DEPLOY_PRIVATE_KEY" | base64 -d | ssh-add -
+    # Create the SSH directory and give it the right permissions
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    # https://docs.gitlab.com/ee/ci/ssh_keys/index.html#verifying-the-ssh-host-keys
+    - ssh-keyscan gitlab.com >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+
+.ade_base:
+  variables:
+    DOCKER_DRIVER: overlay2
+    UBUNTU_DISTRO: focal
+  stage: ade
+  image: docker
+  services:
+    - docker:dind
+  script:
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
+    - apk add --update-cache git
+    - mv ros-deps tools/ade_image
+    - cp autoware.auto.foxy.ssh.repos tools/ade_image
+    - cd tools/ade_image
+    - export ADE_SHA=$(find . -type f | sort | xargs sha256sum | sha256sum | rev | cut -c 4- | rev)
+    - '
+      if [[ -n "$FORCE" ]]; then
+          chmod og-w . -R;
+          docker build
+              --build-arg ROS_DISTRO=${ROS_DISTRO}
+              --build-arg CODENAME=${UBUNTU_DISTRO}
+              --label ade_image_commit_sha="$CI_COMMIT_SHA"
+              --label ade_image_commit_tag="$CI_COMMIT_TAG"
+              -t image .;
+      else
+          (
+              docker pull $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:change-$ADE_SHA &&
+              docker tag $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:change-$ADE_SHA image
+          ) || (
+              chmod og-w . -R;
+              docker build
+                  --build-arg ROS_DISTRO=${ROS_DISTRO}
+                  --build-arg CODENAME=${UBUNTU_DISTRO}
+                  --label ade_image_commit_sha="$CI_COMMIT_SHA"
+                  --label ade_image_commit_tag="$CI_COMMIT_TAG"
+                  -t image .;
+          );
+      fi
+      '
+    - docker tag image $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:change-$ADE_SHA
+    - docker push $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:change-$ADE_SHA
+    - docker tag image $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:commit-$CI_COMMIT_SHA
+    - docker push $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:commit-$CI_COMMIT_SHA
+    - '
+      case $CI_COMMIT_REF_NAME in
+          *\/*)
+              echo "Not pushing ade-$ROS_DISTRO container due to / in branch name $CI_COMMIT_REF_NAME"
+              ;;
+          *\\*)
+              echo "Not pushing ade-$ROS_DISTRO container due to \ in branch name $CI_COMMIT_REF_NAME"
+              ;;
+          *)
+              docker tag image $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:$CI_COMMIT_REF_NAME;
+              docker push $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:$CI_COMMIT_REF_NAME;
+              ;;
+      esac
+      '
+  after_script:
+    - docker container rm -f $(docker container ls --filter "status=exited" -q)
+    - docker image rm $(docker image ls -q)
+  needs:
+    - gen_ros_deps_foxy
+
+.build_base:
+  variables:
+    RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
+  stage: build
+  image: $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:commit-$CI_COMMIT_SHA
+  script:
+    # Pull externals
+    - 'apt-get update && apt-get -y --no-install-recommends install
+          clang-tidy
+          git
+          git-lfs
+      '
+    - 'git lfs install'
+    - 'git lfs pull --include="*" --exclude=""'
+    - 'vcs import < autoware.auto.$ROS_DISTRO.ssh.repos'
+
+    # build and test
+    - 'colcon build
+           --merge-install
+           --install-base /opt/AutowareAuto
+           --cmake-args -DCMAKE_BUILD_TYPE=Release
+      '
+    # Build information.
+    - printf "%s" "$CI_COMMIT_SHA" > "/opt/AutowareAuto/commit_sha"
+    - printf "%s" "$CI_COMMIT_REF_NAME" > "/opt/AutowareAuto/commit_ref_name"
+    - printf "%s" "$CI_PIPELINE_ID" > "/opt/AutowareAuto/pipeline_id"
+    - printf "%s" "$CI_PROJECT_URL" > "/opt/AutowareAuto/project_url"
+    - printf "%s" "$(git log -1 --pretty=%B)" > "/opt/AutowareAuto/commit_message"
+    - chmod -R og-w /opt/AutowareAuto
+    - tar czf opt.tar.gz /opt/AutowareAuto
+    - grep -h -r -o -P "(?<=\<name\>).*(?=\<\/name\>)" $(find src/external -name package.xml) | sort >> external_deps.txt
+  artifacts:
+    name: "$CI_JOB_NAME"
+    paths:
+      - build/
+      - external_deps.txt
+      - opt.tar.gz
+      - ros-deps
+      - tools/ade_image/apt-packages
+      - tools/ade_image/pip3-packages
+
+.gen_deps_base:
+  stage: .pre
+  image: ros:foxy
+  script:
+    - apt-get update && apt-get install python3-vcstool
+    - vcs import < autoware.auto.$ROS_DISTRO.ssh.repos
+    - rosdep update
+    - rosdep install --as-root "apt:false pip:false" --simulate --reinstall --ignore-src -y --from-paths src | sort >> ros-deps
+  artifacts:
+    name: "$CI_JOB_NAME"
+    paths:
+      - ros-deps
+
+.test_base:
+  variables:
+    RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
+  stage: test
+  image: $CI_REGISTRY_IMAGE/$ARCH/ade-$ROS_DISTRO:commit-$CI_COMMIT_SHA
+  script:
+    - tar xzf opt.tar.gz -C /
+    - rm opt.tar.gz
+    - source /opt/AutowareAuto/setup.bash
+
+    # Pull externals
+    - 'apt-get update && apt-get -y --no-install-recommends install
+          clang-tidy
+          git
+          git-lfs
+      '
+    - 'git lfs install'
+    - 'git lfs pull --include="*" --exclude=""'
+    - 'vcs import < autoware.auto.$ROS_DISTRO.ssh.repos'
+
+    # Test
+    - 'colcon test
+           --merge-install
+           --install-base /opt/AutowareAuto
+           --packages-skip $(cat external_deps.txt)
+           --return-code-on-test-failure
+      '
+    - 'colcon test-result --all |grep xml |cut -d":" -f1 |xargs .gitlab-ci/merge-test-results test-results.xml || true'
+
+    # prepare volume artifact
+    - mkdir /opt/AutowareAuto/src
+    - '(cd src && git archive --format=tar HEAD | (cd /opt/AutowareAuto/src && tar xf -))'
+    - cp -a LICENSE /opt/AutowareAuto
+    - chmod -R og-w /opt/AutowareAuto
+    - tar cfz opt.tar.gz /opt/AutowareAuto
+  after_script:
+    - colcon test-result --verbose
+  artifacts:
+    name: "$CI_JOB_NAME"
+    paths:
+      - log
+      - opt.tar.gz
+    reports:
+      junit: test-results.xml
+
+.volume_base:
+  variables:
+    DOCKER_DRIVER: overlay2
+    RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
+    UBUNTU_DISTRO: focal
+  stage: deploy
+  image: docker
+  services:
+    - docker:dind
+  script:
+    - 'echo -e "*\n!opt.tar.gz" > .dockerignore'
+    - |
+      cat >Dockerfile <<EOF
+      FROM alpine
+      ADD opt.tar.gz /
+      VOLUME /opt/AutowareAuto
+      CMD ["/bin/sh", "-c", "trap 'exit 147' TERM; tail -f /dev/null & wait ${!}"]
+      EOF
+    - 'docker build
+          --build-arg ROS_DISTRO=${ROS_DISTRO}
+          --build-arg CODENAME=${UBUNTU_DISTRO}
+          --label ade_image_commit_sha="$CI_COMMIT_SHA"
+          --label ade_image_commit_tag="$CI_COMMIT_TAG"
+          -t image .
+      '
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
+    - docker tag image $CI_REGISTRY_IMAGE/$ARCH/binary-$ROS_DISTRO:commit-$CI_COMMIT_SHA
+    - docker push $CI_REGISTRY_IMAGE/$ARCH/binary-$ROS_DISTRO:commit-$CI_COMMIT_SHA
+    - '
+      case $CI_COMMIT_REF_NAME in
+          *\/*)
+              echo "Not pushing binary-$ROS_DISTRO container due to / in branch name $CI_COMMIT_REF_NAME"
+              ;;
+          *\\*)
+              echo "Not pushing binary-$ROS_DISTRO container due to \ in branch name $CI_COMMIT_REF_NAME"
+              ;;
+          *)
+              docker tag image $CI_REGISTRY_IMAGE/$ARCH/binary-$ROS_DISTRO:$CI_COMMIT_REF_NAME;
+              docker push $CI_REGISTRY_IMAGE/$ARCH/binary-$ROS_DISTRO:$CI_COMMIT_REF_NAME;
+              ;;
+      esac
+      '
+  after_script:
+    - docker container rm -f $(docker container ls --filter "status=exited" -q)
+    - docker image rm $(docker image ls -q)
+
+.release_base:
+  before_script: [] # Ignore default before_script.
+  variables:
+    RELEASE_NAME: $CI_COMMIT_TAG-$ARCH-$ROS_DISTRO
+    BUILD_JOB_NAME: build_${ARCH}_${ROS_DISTRO}
+    TEST_JOB_NAME: test_${ARCH}_${ROS_DISTRO}
+  stage: deploy
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - echo 'Creating release $RELEASE_NAME for tag $CI_COMMIT_TAG'
+  release:
+    name: '$RELEASE_NAME'
+    description: 'Created for tag $CI_COMMIT_TAG'
+    tag_name: '$CI_COMMIT_TAG'
+    ref: '$CI_COMMIT_TAG'
+    assets:
+      links:
+        - name: $BUILD_JOB_NAME.zip
+          url: '$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/download?job=$BUILD_JOB_NAME'
+        - name: $TEST_JOB_NAME.zip
+          url: '$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/download?job=$TEST_JOB_NAME'
+
+gen_ros_deps_amd64_foxy:
+  interruptible: true
+  variables:
+    ARCH: amd64
+    ROS_DISTRO: foxy
+  extends: .gen_deps_base
+
+ade_amd64_foxy:
+  interruptible: true
+  variables:
+    ARCH: amd64
+    ROS_DISTRO: foxy
+  extends: .ade_base
+  needs:
+    - gen_ros_deps_amd64_foxy
+
+build_amd64_foxy:
+  interruptible: true
+  variables:
+    ARCH: amd64
+    ROS_DISTRO: foxy
+  tags:
+    - shared
+  extends: .build_base
+  needs:
+    - gen_ros_deps_amd64_foxy
+    - ade_amd64_foxy
+
+test_amd64_foxy:
+  interruptible: true
+  variables:
+    ARCH: amd64
+    ROS_DISTRO: foxy
+  tags:
+    - shared
+  extends: .test_base
+  needs:
+    - build_amd64_foxy
+
+volume_amd64_foxy:
+  variables:
+    ARCH: amd64
+    ROS_DISTRO: foxy
+  extends: .volume_base
+  needs:
+    - build_amd64_foxy
+    - test_amd64_foxy
+
+release_amd64_foxy:
+  variables:
+    ARCH: amd64
+    ROS_DISTRO: foxy
+  extends: .release_base
+  needs:
+    - volume_amd64_foxy

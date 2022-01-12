@@ -1,0 +1,135 @@
+<robot name="AV21">
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <mesh filename="package://il15_description/visual/il15.dae" />
+      </geometry>
+    </visual>
+  </link>
+
+  <link name="base_footprint" />
+  <link name="nav_base" />
+
+  <link name="gps_top" />
+  <link name="gps_bottom" />
+
+  <link name="lidar_front" />
+  <link name="lidar_left" />
+  <link name="lidar_right" />
+
+  <link name="camera_front_left" />
+  <link name="camera_front_right" />
+  <link name="camera_rear_left" />
+  <link name="camera_rear_right" />
+  <link name="camera_front_1" />
+  <link name="camera_front_2" />
+
+  <link name="radar_front" />
+  <link name="radar_port" />
+  <link name="radar_starboard" />
+  <link name="radar_rear" />
+
+  <link name="rear_axle_middle_ground" />
+
+  <joint name="nav_base_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="nav_base" />
+    <origin xyz="1.248 0.0 0.077" />
+  </joint>
+
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="base_footprint" />
+    <origin xyz="0 0 -0.198" />
+  </joint>
+
+  <joint name="gps_top_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="gps_top" />
+	<origin xyz="1.606 0.0 -0.0703" />
+  </joint>
+
+  <joint name="gps_bottom_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="gps_bottom" />
+	<origin xyz="1.606 0.0 -0.1428" />
+  </joint>
+
+  <joint name="lidar_front_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="lidar_front" />
+    <origin xyz="2.242 0 0.448" />
+  </joint>
+
+  <joint name="lidar_left_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="lidar_left" />
+    <origin xyz="1.549 0.267 0.543" rpy="0 0 2.0943951024" />
+  </joint>
+
+  <joint name="lidar_right_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="lidar_right" />
+    <origin xyz="1.549 -0.267 0.543" rpy="0 0 -2.0943951024" />
+  </joint>
+
+  <joint name="camera_front_left_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="camera_front_left" />
+    <origin xyz="2.184 0.171 0.422" rpy="0 0 0.9599310886" />
+  </joint>
+
+  <joint name="camera_front_right_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="camera_front_right" />
+    <origin xyz="2.184 -0.171 0.422" rpy="0 0 -0.9599310886" />
+  </joint>
+
+  <joint name="camera_rear_left_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="camera_rear_left" />
+    <origin xyz="1.473 0.140 0.543" rpy="0 0 2.2689280276" />
+  </joint>
+
+  <joint name="camera_rear_right_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="camera_rear_right" />
+    <origin xyz="1.473 -0.140 0.543" rpy="0 0 -2.2689280276" />
+  </joint>
+
+  <joint name="camera_front_1_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="camera_front_1" />
+    <origin xyz="2.235 0.121 0.422" />
+  </joint>
+
+<joint name="camera_front_2_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="camera_front_2" />
+    <origin xyz="2.235 -0.121 0.422" />
+  </joint>
+
+  <joint name="radar_front_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="radar_front" />
+    <origin xyz="1.784 0.0 0.594" />
+  </joint>
+
+  <joint name="radar_port_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="radar_port" />
+    <origin xyz="2.032 0.213 0.406" rpy="0 0 1.5707963267949" />
+  </joint>
+
+  <joint name="radar_starboard_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="radar_starboard" />
+    <origin xyz="2.032 -0.213 0.406" rpy="0 0 -1.5707963267949" />
+  </joint>
+
+  <joint name="radar_rear_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="radar_rear" />
+    <origin xyz="-0.768 0.0 0.107" rpy="0 0 3.14159265358979" />
+  </joint>
+</robot>
